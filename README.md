@@ -1,2 +1,2 @@
 # datasciencecoursera
-This repo is for class exercises
+This repo is for class exercises submited the 
