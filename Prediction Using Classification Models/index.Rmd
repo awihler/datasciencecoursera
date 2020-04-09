@@ -1,0 +1,585 @@
+---
+title: "Excercise Prediction Using Classification Models"
+author: "A. Wihler"
+date: "3/04/2018"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 4
+    theme: united
+---
+
+```{r setup, include=FALSE}
+library(kableExtra)
+
+library(dplyr)
+library(ggplot2)
+
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+
+setwd("/Users/andrewwihler/Documents/Education/coursera/data science specialisation - JohnHopkins/Practical Machine Learning/Course Project")
+```
+
+
+***
+#### Synopsis
+This analysis attempts to predict the manner in which a series of exercises were performed using accelerometer data on the belt, forearm, arm, and dumbbell of 6 participants[^1].  
+
+The primary modelling methodology is random forest, but the analysis also includes and compares the random forest accuracy to classification tree and bagging (of classification trees). The random forest model demonstrates the highest prediction accuracy and is used for the prediction of the test data.
+
+
+***
+#### R Libraries
+```{r, results='hide', echo=TRUE, eval=FALSE}
+library(dplyr)
+library(ggplot2)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+```
+
+
+***
+#### Getting the Data
+
+##### Loading Data from Source 
+The training and test data sets are downloaded using the URLs defined in *fileURL1* and *fileURL2*, respectively.  The data is located in a directory under the working directory (*./data*).  If the *.csv* data files are already in the directory, the downloading step is skipped. 
+```{r, results='hide', cache=TRUE}
+if(!file.exists("./data/pml-training.csv")){
+    print("downloading .....")
+    fileURL1 <- paste0("https://d396qusza40orc.cloudfront.net/predmachlearn",
+                       "/pml-training.csv")
+    download.file(fileURL1,destfile = "./data/pml-training.csv")
+    print("data zip file successfully downloaded")
+}
+```
+
+```{r, results='hide', cache=TRUE}
+if(!file.exists("./data/pml-testing.csv")){
+    print("downloading .....")
+    fileURL2 <- paste0("https://d396qusza40orc.cloudfront.net/predmachlearn",
+                       "/pml-testing.csv")
+    download.file(fileURL2,destfile = "./data/pml-testing.csv")
+    print("data zip file successfully downloaded")
+}
+```
+
+##### Reading Data into Workspace
+After downloading the *.csv* data files, the data is read into the current working directory.
+```{r, results='hide', cache=TRUE}
+if(!exists("pml_training")){
+    print("downloading .....")    
+    pml_training <- read.csv(paste0(getwd(),"/data/pml-training.csv"),
+                             na.strings = "NA")
+    print("pml_training downloaded")
+}
+```
+
+```{r, results='hide', cache=TRUE}
+if(!exists("pml_testing")){
+    print("downloading .....")    
+    pml_testing <- read.csv(paste0(getwd(),"/data/pml-testing.csv"),
+                            na.strings = "NA")
+    print("pml_testing downloaded")
+}
+```
+
+
+***
+#### Data Exploration & Cleaning
+A first view of both the training and testing data sets reveal a diverse mixture of different data types. A number of variables include `NA`, `#DIV/0` or simply a blank entry.  Both data sets also include metadata that needs to be excluded from the model training and prediction steps.  
+```{r, echo=TRUE, eval=TRUE}
+str(pml_testing, strict.width="cut", list.len=15)
+str(pml_training, strict.width="cut", list.len=15)
+```
+
+The metadata variables include information such as user name, time stamping, etc.  These variables are listed together in `meta_data` and are removed from the data sets.
+```{r, echo=TRUE, eval=TRUE}
+meta_data = c('X', 'user_name', 'raw_timestamp_part_1', 'raw_timestamp_part_2', 'cvtd_timestamp', 'new_window', 'num_window')
+```
+```{r, echo=TRUE, eval=TRUE}
+`%ni%` <- Negate(`%in%`) 
+pml_train_data <- subset(pml_training, select = names(pml_training) %ni% meta_data) 
+pml_test_data <- subset(pml_testing, select = names(pml_testing) %ni% meta_data)
+```
+```{r, echo=FALSE, eval=FALSE}
+# remove above variables: another method to above
+pml_train_data <- pml_training[, -which(names(pml_training) %in% meta_data)]
+```
+
+```{r, echo=FALSE, eval=FALSE}
+str(pml_test_data, strict.width="cut", list.len=15)
+str(pml_train_data, strict.width="cut", list.len=15)
+```
+The *test* data set is used to determine all measured variables relevant for the model analysis.  All variables in the *test* data set that include (only) `NA` are collected in the variable **pml_features**.
+```{r, echo=TRUE, eval=TRUE}
+pml_features <- colnames(pml_test_data)[apply(!is.na(pml_test_data), 2, any)]
+```
+In addition, a comparison is made between the *test* and *training* data sets to determine any data set unique variable.  
+```{r, echo=TRUE, eval=TRUE}
+var_diff_testtotrain <- setdiff(colnames(pml_testing), colnames(pml_training))
+var_diff_traintotest <- setdiff(colnames(pml_training), colnames(pml_testing))
+```
+
+```{r, echo=FALSE}
+vd <- c(pml_testing = var_diff_testtotrain, 
+        pml_training = var_diff_traintotest)
+knitr::kable(vd, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+The comparison shows that the variable **`r var_diff_testtotrain`** is included in the *testing* data, but not in the *training* data, and the variable **`r var_diff_traintotest`** is included only in the *training* data set.  The variable **`r var_diff_traintotest`** is the *predicted* variable and the variable **`r var_diff_testtotrain`** is used to identify the test cases in the final prediction analysis.
+```{r, echo=FALSE, eval=FALSE}
+# check to see if the "classe" or "problem_id" variables are inclided.  
+any(pml_features %in% c("problem_id"))
+```
+To use **pml_features** for extracting out all relevant variables from the *training* data, the variable **`r var_diff_testtotrain`** must first be removed as it does not exist in the *training* data set. 
+```{r, echo=TRUE, eval=TRUE}
+pml_features <-  pml_features[!pml_features %in% c("problem_id")]
+```
+```{r, echo=FALSE, eval=FALSE}
+any(pml_features %in% c("problem_id"))
+```
+The variables defined in **pml_features** are then applied to the *training* data set.  The variable **`r var_diff_traintotest`** is retained and positioned as the first variable in the new data set (**pml_train_clean**).  
+```{r, echo=TRUE, eval=TRUE}
+pml_train_clean <- pml_train_data %>%
+    select("classe",pml_features)
+```
+This step is also applied to the *test* data for visualisation purposes only.  For the final prediction only the original **pml_testing** data set is used.
+```{r, echo=TRUE, eval=TRUE}
+pml_test_clean <- pml_test_data %>%
+    select("problem_id", pml_features)
+```
+In removing the `NA` data, and retaining only on those variables provided in the *test* data set, all the other undesirable data including `#DIV/0` have been removed.  
+```{r, echo=TRUE, eval=TRUE}
+str(pml_test_clean, strict.width="cut", list.len=10)
+str(pml_train_clean, strict.width="cut", list.len=10)
+```
+The *cleaned* training data set (**pml_train_clean**) retains all `r dim(pml_train_clean)[1]` observations of the original data set (**pml_training**), but with only `r dim(pml_train_clean)[2]` versus the original `r dim(pml_training)[2]` variables. The `r dim(pml_train_clean)[2]` variables includes `r dim(pml_train_clean)[2]-1` predictor variables plus the predicted variable **classe**. 
+
+
+***
+#### Create Training and Testing Data 
+For training and validating the model, the training data is split into the **model_train** and **model_test** data sets.  The split uses a 70/30 ratio.
+```{r, echo=TRUE, eval=TRUE}
+set.seed(180301)
+samp <- sample(nrow(pml_train_clean), 0.7 * nrow(pml_train_clean))
+model_train <- pml_train_clean[samp, ]
+model_test <- pml_train_clean[-samp, ]
+```
+```{r, echo=FALSE, eval=FALSE}
+dim(model_train); dim(model_test)
+```
+The validation data (**model_test**) includes `r dim(model_test)[1]` variables while the training data set (**model_train**) retains `r dim(model_train)[1]` variables.
+
+##### Index for Prediction Variable
+The column index of the predicted variable **classe** is retrieved from the training data set.  This information is used to exclude the predicted variable in the prediction steps.
+```{r , echo=TRUE, eval=TRUE}
+typeColNum <- grep("classe", names(pml_train_clean))
+```
+
+
+***
+### Model Construction & Analysis
+The model design is be based on classification tree and random forest.  The initial model will attempt to fit the data to a single *(pruned) classification tree*.  This will follow with *bagging* (bootstrap aggregation) of classification trees and finally a *random forest*.  All  `r (dim(model_train)[2]) -1` variables are used in model training.  Finally a method is shown to evaluate if any variable can be removed from the random forest model.
+
+#### Classification Tree
+```{r class_tree, echo=TRUE, eval=TRUE, cache=TRUE}
+set.seed(180301)
+pml_ct <- rpart(classe ~ ., method="class", data = model_train)
+```
+
+##### Complexity Table
+The complexity table indicates that the classification tree uses 15 of the 52 variables.  
+```{r, echo=TRUE, eval=TRUE}
+printcp(pml_ct)  
+```
+The complexity parameter `CP` (also referred to as $\alpha$) is used to  determine whether a split contributes to a better model fit. The value is varied in the pruning step and set to the smallest cross validation error (`xerror`).
+```{r, echo=FALSE, eval=FALSE}
+# The error rate of the first node. Can be extracted using:
+ pml_ct$frame[1, 'dev']/pml_ct$frame[1, 'n'] 
+```
+
+##### Cross-Validation
+The value of the cross validation error versus the complexity parameter and tree size is visualised using `plotcp()`.
+```{r, echo=TRUE, eval=TRUE, fig.align='center'}
+plotcp(pml_ct)    
+```
+
+```{r, echo=FALSE, eval=FALSE}
+##### Plot Classification Tree
+rpart.plot(pml_ct, extra = 101, main="Classification Tree")
+```
+```{r, echo=FALSE, eval=FALSE}
+# use.n = TRUE adds number of observations at each node
+# xpd = TRUE keeps the labels from exteding outside the plot
+plot(pml_ct, uniform=TRUE, main="Classification Tree")
+text(pml_ct, use.n=TRUE, xpd = TRUE, cex=.8)
+```
+
+##### Prune the tree
+The best complexity parameter is selected corresponding to the lowest cross validation error.  
+```{r best_cp, echo=TRUE, eval=TRUE}
+bestcp <- pml_ct$cptable[which.min(pml_ct$cptable[,"xerror"]),"CP"]
+bestcp
+```
+In this case, the value is very close to zero, so no relevant impact from pruning is expected.  
+```{r class_tree_pr, echo=TRUE, eval=TRUE, cache=TRUE}
+set.seed(180301)
+pml_ctp<- prune(pml_ct, cp=bestcp)
+```
+
+```{r, echo=FALSE, eval=FALSE, fig.align='center', fig.height=12, fig.width=12}
+##### Pruned Classification Tree Plot
+# The pruned classification tree takes in fact the same structure as the unpruned tree (not shown).
+rpart.plot(pml_ctp, extra = 101, main="Pruned Classification Tree")
+```
+```{r, echo=FALSE, eval=FALSE}
+# use.n = TRUE adds number of observations at each node
+# xpd = TRUE keeps the labels from extending outside the plot
+plot(pml_ctp, uniform=TRUE, compress=TRUE, main="Pruned Classification Tree")
+text(pml_ctp, use.n=TRUE, xpd = TRUE, cex=.8)
+```
+
+##### Prediction
+The pruned classification tree is tested using the validation data set split from the training data set.
+```{r class_tree_pr_pred, echo=TRUE, eval=TRUE, cache=TRUE}
+pr_pml_ctp <- predict(pml_ctp, type="class", newdata=model_test[,-typeColNum]) 
+```
+
+##### Confusion Matrix & Prediction Accuracy
+```{r class_tree_pr_conf, echo=TRUE, eval=TRUE}
+conf_matrix <- table(pr_pml_ctp, model_test$classe)
+colnames(conf_matrix) <- paste(colnames(conf_matrix), "-actual", sep = "")
+rownames(conf_matrix) <- paste(rownames(conf_matrix), "-predicted", sep = "")
+```
+```{r, echo=TRUE, eval=FALSE}
+prediction.accuracy <- mean(pr_pml_ctp==model_test$classe) 
+misclassification.rate <- 1-mean(pr_pml_ctp==model_test$classe)        
+```
+```{r, echo=FALSE, eval=TRUE}
+knitr::kable(conf_matrix, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+```{r, echo=FALSE, eval=TRUE}
+pa <- round(mean(pr_pml_ctp==model_test$classe)*100, 1)
+mr <- round((1-mean(pr_pml_ctp==model_test$classe))*100, 1)
+df <- data.frame(prediction.accuracy=pa, misclassification.rate=mr)
+knitr::kable(df, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+
+
+***
+#### Bagging (Classification Tree)
+Bagging generates multiple models by taking repeated samples from a (single) training data set using bootstrap.  A decision tree is trained on each bootstrapped training data set, and a single prediction is given by the maximum (for classification trees) of all the individual tree predictions.
+
+To apply bagging using the `randomForest()` function, all variables to be tried at each split (`mtry`) must be forced to include all variables.  In other words, `mtry` is set to `r (dim(model_train)[2]) -1` variables. 
+```{r rf_build_oob, echo=TRUE, eval=TRUE, cache=TRUE}
+set.seed(180301)
+pml_rfb <- randomForest(classe ~., data=model_train, 
+                        importance=TRUE,
+                        xtest=model_test[,-typeColNum], 
+                        mtry=ncol(model_test[,-typeColNum]), 
+                        ntree=500, 
+                        type = "class")
+```
+```{r, echo=FALSE, eval=TRUE}
+pml_rfb
+```
+The model output indicates that all `r (dim(model_train)[2]) -1` variables were evaluated at each split. 
+```{r, echo=FALSE, eval=FALSE}
+knitr::kable(pml_rfb$confusion, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+
+```{r rf_vi_oob, echo=FALSE, eval=FALSE, fig.align='center', fig.height=6, fig.width=8}
+##### Variable Importance
+# Only a 15 of the 52 of variables are shown in the Variable Importance Plot.  The filter required the Mean Decrease in Gini to be above 200 which resulted in only the best 15 variables being displayed. 
+to_remove<-c(which(data.frame(pml_rfb$importance)$MeanDecreaseGini<200))
+varImpPlot(pml_rfb, type=2, n.var=ncol(model_train[,-c(typeColNum, to_remove)]))
+```
+```{r, echo=FALSE, eval=FALSE}
+knitr::kable(head(data.frame(pml_rfb$importance)), "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+
+##### Error vs Number of Trees
+The error decreases rapidly between 1 and 50 trees, and settles between 300 and 400 trees.  The model training uses a maximum of 500 trees, which should be sufficient for obtaining good prediction accuracies.  
+```{r, echo=TRUE, eval=TRUE, fig.align='center', fig.height=6, fig.width=6}
+plot(pml_rfb)
+legend("top", colnames(pml_rfb$err.rate), fill = 1:6)
+```
+
+##### Confusion Matrix & Prediction Accuracy
+The bagging procedure demonstrates a significant improvement in prediction accuracy over the single classification tree (`r round(mean(pml_rfb$test$predicted==model_test$classe)*100, 1)`% for bagging versus `r round(mean(pr_pml_ctp==model_test$classe)*100, 1)`% for the classification tree). 
+```{r rf_conf_oob, echo=TRUE, eval=TRUE}
+conf_matrix <- table(pml_rfb$test$predicted, model_test$classe)
+colnames(conf_matrix) <- paste(colnames(conf_matrix), "(actual)", sep = " ")
+rownames(conf_matrix) <- paste("Pred", rownames(conf_matrix), sep = ":")
+```
+```{r rf_mc_oob, echo=TRUE, eval=FALSE}
+prediction.accuracy <- mean(pml_rfb$test$predicted==model_test$classe)
+misclassification.rate <- 1-mean(pml_rfb$test$predicted==model_test$classe)   
+```
+```{r, echo=FALSE, eval=TRUE}
+knitr::kable(conf_matrix, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+```{r, echo=FALSE, eval=TRUE}
+pa <- round(mean(pml_rfb$test$predicted==model_test$classe)*100, 1)
+mr <- round((1-mean(pml_rfb$test$predicted==model_test$classe))*100, 1)
+df <- data.frame(prediction.accuracy=pa, misclassification.rate=mr)
+knitr::kable(df, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+ 
+
+***
+#### Random Forest
+The random forest algorithm also applies the bagging procedure, but in addition also includes a random subset of predictor variables when splitting nodes during tree construction.  Each time a split is considered, a random sample of predictors is chosen from the full set of predictor variables.  The number of variables used each time is nominally given by the square-root of the total number of variables ($\sim \sqrt{p}$) which is also the default setting for the `randomforest()` algorithm. 
+```{r rf_build, echo=TRUE, eval=TRUE, cache=TRUE}
+set.seed(180301)
+pml_rf <- randomForest(classe ~., data=model_train, 
+                        importance=TRUE,
+                        xtest=model_test[,-typeColNum], 
+                        ntree=500, 
+                        type = "class", 
+                        keep.forest=TRUE)
+```
+```{r, echo=FALSE, eval=TRUE}
+pml_rf
+```
+```{r, echo=FALSE, eval=FALSE}
+knitr::kable(pml_rf$confusion, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+The output from `randomForest()` confirms that the number of variables tried at each split is $\sim \sqrt{p}$ or `mtry` = `r round(sqrt(ncol(model_test[,-typeColNum])), 0)`.
+
+```{r rf_vi, echo=FALSE, eval=FALSE, fig.align='center', fig.height=6, fig.width=8}
+##### Variable Importance
+# Only 15 of the 52 of variables (`MeanDecreaseGini>=200`) are shown in the Variable Importance Plot.  
+to_remove<-c(which(data.frame(pml_rf$importance)$MeanDecreaseGini<200))
+varImpPlot(pml_rf, type=2, n.var=ncol(model_train[,-c(typeColNum, to_remove)])) 
+```
+```{r, echo=FALSE, eval=FALSE}
+knitr::kable(head(data.frame(pml_rf$importance)), "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+
+##### Error vs Number of Trees
+The error plot shows the same characteristics as in the bagging case. The error decreases rapidly and settles out between 300 and 400 trees.  The error at 500 tress is clearly lower than for the bagging procedure.  
+```{r, echo=TRUE, eval=TRUE, fig.align='center', fig.height=6, fig.width=6}
+plot(pml_rf)
+legend("top", colnames(pml_rf$err.rate), fill = 1:6)
+```
+
+##### Confusion Matrix & Prediction Accuracy
+The random forest algorithm shows further improvement in prediction accuracy over the bagging procedure (`r round(mean(pml_rf$test$predicted==model_test$classe)*100, 1)`% for random forest versus `r round(mean(pml_rfb$test$predicted==model_test$classe)*100, 1)`% for bagging). The relative prediction accuracy between the random forest and bagging algorithms can also be visualised by examination of the confusion matrices.  The number of misclassified (off-diagonal) events are visibly lower in the random forest confusion matrix. 
+```{r rf_conf, echo=TRUE, eval=TRUE}
+conf_matrix <- table(pml_rf$test$predicted, model_test$classe)
+colnames(conf_matrix) <- paste(colnames(conf_matrix), "(actual)", sep = " ")
+rownames(conf_matrix) <- paste("Pred", rownames(conf_matrix), sep = ":")
+```
+```{r rf_mc, echo=TRUE, eval=FALSE}
+prediction.accuracy <- mean(pml_rf$test$predicted==model_test$classe)   
+misclassification.rate <- 1-mean(pml_rf$test$predicted==model_test$classe)  
+```
+```{r, echo=FALSE}
+knitr::kable(conf_matrix, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+```{r, echo=FALSE}
+pa <- round(mean(pml_rf$test$predicted==model_test$classe)*100, 1)
+mr <- round((1-mean(pml_rf$test$predicted==model_test$classe))*100, 1)
+df <- data.frame(prediction.accuracy=pa, misclassification.rate=mr)
+knitr::kable(df, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+
+
+***
+#### Random Forest with Selected Predictors
+The number of trees (`ntree`) and the number of variables to be considered for splitting (`mtry`) were examined, but the number of predictor variables have not yet been considered. Running a model with fewer predictors may help interpretation and save on computational effort. 
+
+There are a number of different methods to help decide which variables, if any, should be removed from the model structure.  One possible method is to construct the random forest after the introduction of a noise variable into the data set. Any variable that has a mean decrease in the Gini Index (`MeanDecreaseGini`) below that of the *noise* variable can be considered for disqualification as a predictor variable.  
+
+Another possibility would be to remove the variable with the lowest mean decrease in the Gini Index and repeat the Random Forest model build.  If the prediction accuracy (test data) improves, select the next lowest variable and repeat.  if there is no change or no increase in the prediction accuracy, the iteration stops.
+
+##### Introduce Noise Variable into Data Set
+A noise variable is introduced using the numeric range of the data set.
+```{r rf_noise, echo=TRUE, eval=TRUE}
+data_range <- range(model_train[,-typeColNum])
+model_train_n <- data.frame(model_train, noise = sample(c(data_range[1]:data_range[2]), nrow(model_train), replace = TRUE))
+model_test_n <- data.frame(model_test, noise = sample(c(data_range[1]:data_range[2]), nrow(model_test), replace = TRUE))
+```
+
+##### Random Forest with Noise Variable
+```{r rf_build_n, echo=TRUE, eval=TRUE, cache=TRUE}
+set.seed(180301)
+pml_rfn <- randomForest(classe ~., data=model_train_n, 
+                        importance=TRUE,
+                        xtest=model_test_n[, -typeColNum], 
+                        ntree=500, 
+                        type = "class", 
+                        keep.forest=TRUE)
+```
+```{r, echo=FALSE, eval=TRUE}
+pml_rfn
+```
+```{r, echo=FALSE, eval=FALSE}
+knitr::kable(pml_rfn$confusion, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+
+##### Variable Importance
+All variables including the **noise** variable are shown in the Variable Importance Plot.  From inspection, the noise variable has the lowest mean decrease in the Gini index and therefore *none* of the measured predictor variables can be removed based on this method.
+```{r rf_vi_n, echo=TRUE, eval=TRUE, fig.align='center', fig.height=12, fig.width=8}
+varImpPlot(pml_rfn, type=2, n.var=ncol(model_train_n[, -typeColNum])) 
+```
+
+```{r rf_rm1, echo=FALSE, eval=FALSE}
+##### Variables to remove
+# Remove the all variables with a mean decrease in the Gini Index (`MeanDecreaseGini`) below the inserted random *noise* variable:
+noise_Gini <- data.frame(pml_rfn$importance)["noise", "MeanDecreaseGini"]
+to_remove <- c(which(data.frame(pml_rfn$importance)$MeanDecreaseGini<noise_Gini))
+```
+```{r rf_rm2, echo=FALSE, eval=FALSE}
+# To remove the varaible with the lowest mean decrease in the Gini Index (`MeanDecreaseGini`):
+to_remove <- c(which(data.frame(pml_rf$importance)$MeanDecreaseGini==
+                       min(data.frame(pml_rf$importance)$MeanDecreaseGini)))
+```
+```{r, echo=FALSE, eval=FALSE}
+knitr::kable(to_remove, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+
+```{r rf_form_s, echo=FALSE, eval=FALSE}
+##### Remove Selected Variables
+var_predict <- paste(names(model_train)[-c(typeColNum, to_remove)],collapse="+")
+rf_form <- as.formula(paste(names(model_train)[typeColNum], var_predict, sep = " ~ "))
+print(rf_form)
+```
+
+```{r rf_build_s, echo=FALSE, eval=FALSE, cache=TRUE}
+##### Random Forest with Selected and Noise Variables Removed
+set.seed(180301)
+pml_rfs <- randomForest(rf_form, data=model_train, 
+                        importance=TRUE,
+                        xtest=model_test[,-c(typeColNum, to_remove)], 
+                        ntree=500, 
+                        type = "class")
+```
+```{r, echo=FALSE, eval=FALSE}
+pml_rfs
+```
+```{r, echo=FALSE, eval=FALSE}
+knitr::kable(pml_rfs$confusion, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+
+```{r rf_vi_s, echo=FALSE, eval=FALSE, fig.align='center', fig.height=12, fig.width=10}
+##### Variable Importance
+varImpPlot(pml_rfs, type=2, n.var=ncol(model_train[,-c(typeColNum, to_remove)]))
+pml_imp_s <- data.frame(pml_rfs$importance)
+head(pml_imp_s); dim(pml_imp_s)
+```
+```{r, echo=FALSE, echo=FALSE, eval=FALSE}
+knitr::kable(head(pml_imp_s), "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+
+```{r, echo=FALSE, echo=FALSE, eval=FALSE}
+##### Error vs Number of Trees
+plot(pml_rfs, main="error versus number of trees")
+legend("top", colnames(pml_rfs$err.rate), fill = 1:6)
+```
+
+```{r rf_conf_s, echo=FALSE, eval=FALSE}
+##### Confusion Matrix (Test Data)
+conf_matrix <- table(pml_rfs$test$predicted, model_test$classe)
+colnames(conf_matrix) <- paste(colnames(conf_matrix), "(actual)", sep = " ")
+rownames(conf_matrix) <- paste("Pred", rownames(conf_matrix), sep = ":")
+```
+```{r, echo=FALSE, eval=, eval=FALSE}
+knitr::kable(conf_matrix, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+
+```{r rf_mc_s, echo=FALSE, eval=FALSE}
+##### Prediction Accuracy
+prediction.accuracy <- mean(pml_rfs$test$predicted==model_test$classe)     
+misclassification.rate <- 1-mean(pml_rfs$test$predicted==model_test$classe)  
+```
+```{r, echo=FALSE, eval=FALSE}
+pa <- round(mean(pml_rfs$test$predicted==model_test$classe)*100, 1)
+mr <- round((1-mean(pml_rfs$test$predicted==model_test$classe))*100, 1)
+df <- data.frame(prediction.accuracy=pa, misclassification.rate=mr)
+knitr::kable(df, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+
+
+***
+#### Model Comparison
+The random forest algorithm has demonstrated superior predictive capabilities over the classification tree and bagging.  The prediction exercise using the given test data set is, therefore, performed using the random forest model.
+```{r, echo=FALSE, eval=TRUE}
+pa_ctp <- round(mean(pr_pml_ctp==model_test$classe)*100, 1)
+pa_rfb <- round(mean(pml_rfb$test$predicted==model_test$classe)*100, 1)
+pa_rf <- round(mean(pml_rf$test$predicted==model_test$classe)*100, 1)
+df <- data.frame(row.names = c("classification tree", "bagging (classification tree)", "random forest"), prediction.accuracy = c(pa_ctp, pa_rfb, pa_rf)) 
+knitr::kable(df, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+
+
+***
+### Prediction on the Test Data
+```{r pml_pred, echo=TRUE, eval=TRUE}
+pml_prediction <- predict(pml_rf, newdata=pml_testing, type = "class")
+```
+```{r, echo=FALSE, eval=FALSE}
+pml_pred_t1 <- t(pml_prediction)
+knitr::kable(pml_pred_t1, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+```{r, echo=FALSE, eval=TRUE}
+pml_pred_t2 <- t(data.frame(pml_prediction))
+knitr::kable(pml_pred_t2, "html") %>%
+    kable_styling(bootstrap_options = c("striped", "hovered", "condensed"),
+                  full_width = F, position = "center")
+```
+
+```{r write_files, echo=FALSE, eval=FALSE}
+# write results into separate text files
+write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+write_files(pml_prediction)
+```
+
+[^1]: Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
